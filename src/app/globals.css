@@ -1,0 +1,549 @@
+@import "tailwindcss";
+
+/* =============================================================================
+   CARRYWORKS — glass, chrome and void.
+
+   Dark ground, lit objects. Every surface is a pane of glass sitting in front
+   of a nebula: a tint, a 1px rim that catches light at the top, a specular
+   sheen down the first 40%, and a shadow underneath so it reads as an object
+   rather than a rectangle. Controls behave like objects too — hover lifts one
+   pixel, :active pushes back down. It is that second half that makes the
+   relief believable.
+
+   THE COLOUR RULE, do not break it: violet→cyan is the brand's energy and
+   marks the things you can act on — a primary button, an active filter, a live
+   number. `--color-warn` is the only other chromatic ink and means exactly one
+   thing: *nobody has vetted this*. It marks the unreviewed warnings, the open
+   interlocks and the lines a depositor is expected to read before parting with
+   money. It never marks a loss, and never decorates.
+   ========================================================================== */
+
+@theme {
+  /* Only the void is opaque. Every "surface" above it is a wash of white the
+     nebula shows through, so a band or a tile frosts the background instead of
+     covering it — that is what keeps the page feeling like glass in front of a
+     scene rather than panels stacked on black. */
+  --color-void: #06060c;
+  --color-surface: rgba(255, 255, 255, 0.03);
+  --color-surface-2: rgba(255, 255, 255, 0.06);
+  --color-surface-3: rgba(255, 255, 255, 0.12);
+
+  --color-hi: #eceef6;
+  --color-mid: #a3a5bd;
+  --color-low: #8385a3;
+
+  --color-violet: #7c5cff;
+  --color-cyan: #34e6ff;
+  --color-warn: #ff5c7a;
+
+  --font-display: "Space Grotesk", "Inter Tight", system-ui, sans-serif;
+  --font-sans: Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  --radius-card: 20px;
+  --radius-panel: 14px;
+}
+
+:root {
+  /* Glass */
+  --glass: rgba(255, 255, 255, 0.045);
+  --glass-2: rgba(255, 255, 255, 0.07);
+  --rim: rgba(255, 255, 255, 0.13);
+  --rim-strong: rgba(255, 255, 255, 0.24);
+  --sheen: rgba(255, 255, 255, 0.1);
+  --specular: rgba(255, 255, 255, 0.34);
+
+  --line: rgba(255, 255, 255, 0.08);
+  --line-soft: rgba(255, 255, 255, 0.045);
+  --line-strong: rgba(255, 255, 255, 0.18);
+
+  --brand: linear-gradient(112deg, #7c5cff 0%, #34e6ff 100%);
+  --brand-soft: linear-gradient(
+    112deg,
+    rgba(124, 92, 255, 0.16) 0%,
+    rgba(52, 230, 255, 0.16) 100%
+  );
+  --warn-wash: rgba(255, 92, 122, 0.09);
+
+  --shell: 1180px;
+  --nav-h: 66px;
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  color-scheme: dark;
+}
+
+/* Element-level rules go in @layer base. An unlayered `a { color: inherit }`
+   outranks every layered rule, including Tailwind's own utilities, and would
+   silently defeat any `text-*` written on a link. */
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+
+  html {
+    scroll-behavior: smooth;
+    scroll-padding-top: calc(var(--nav-h) + 24px);
+    -webkit-text-size-adjust: 100%;
+  }
+
+  /* The nebula rides on the body's own background layers with
+     `background-attachment: fixed` — a `::before` with a negative z-index
+     would paint behind the body's background colour and never be seen. */
+  body {
+    color: var(--color-hi);
+    font-family: var(--font-sans);
+    font-size: 15px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    background-color: var(--color-void);
+    background-image:
+      radial-gradient(
+        62rem 42rem at 8% -6%,
+        rgba(124, 92, 255, 0.26),
+        transparent 62%
+      ),
+      radial-gradient(
+        52rem 38rem at 96% 4%,
+        rgba(52, 230, 255, 0.15),
+        transparent 60%
+      ),
+      radial-gradient(
+        72rem 52rem at 50% 104%,
+        rgba(124, 92, 255, 0.16),
+        transparent 62%
+      );
+    background-attachment: fixed;
+    background-repeat: no-repeat;
+  }
+
+  ::selection {
+    background: rgba(124, 92, 255, 0.4);
+    color: #fff;
+  }
+
+  a {
+    color: inherit;
+    text-decoration: none;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-cyan);
+    outline-offset: 2px;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.12);
+    border-radius: 999px;
+  }
+}
+
+@layer components {
+  .shell {
+    width: 100%;
+    max-width: var(--shell);
+    margin-inline: auto;
+    padding-inline: 20px;
+  }
+
+  .label {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    line-height: 1.2;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--color-low);
+    font-weight: 500;
+  }
+
+  .display {
+    font-family: var(--font-display);
+    font-weight: 500;
+    letter-spacing: -0.035em;
+    line-height: 1.04;
+    color: var(--color-hi);
+    text-wrap: balance;
+  }
+
+  .num {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.02em;
+  }
+
+  /* Ink that is lit from behind — for the one number a section is about. */
+  .glow {
+    background: var(--brand);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  /* ---------------------------------------------------------------- glass -- */
+  /* Only the unprefixed property is written here. Declaring the -webkit- alias
+     next to it makes the minifier collapse the pair and keep the prefixed one
+     alone, and the blur then never applies. */
+  .panel {
+    position: relative;
+    isolation: isolate;
+    border-radius: var(--radius-card);
+    background: var(--glass);
+    border: 1px solid var(--rim);
+    backdrop-filter: blur(22px) saturate(150%);
+    box-shadow:
+      inset 0 1px 0 var(--specular),
+      inset 1px 0 2px -1px rgba(255, 255, 255, 0.14),
+      inset -1px 0 2px -1px rgba(255, 255, 255, 0.14),
+      0 18px 40px -24px rgba(0, 0, 0, 0.9);
+  }
+
+  /* The sheen: a highlight that fades out by 40%, so the pane looks like it
+     has thickness rather than a gradient painted on it. */
+  .panel::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    border-radius: inherit;
+    pointer-events: none;
+    background:
+      linear-gradient(to bottom, var(--sheen) 0%, transparent 40%),
+      radial-gradient(
+        120% 70% at 10% -12%,
+        rgba(124, 92, 255, 0.16),
+        transparent 60%
+      );
+  }
+
+  .panel > * {
+    position: relative;
+    z-index: 1;
+  }
+
+  .panel-tint {
+    border-radius: var(--radius-panel);
+    background: var(--glass-2);
+    border: 1px solid var(--rim);
+    backdrop-filter: blur(14px);
+  }
+
+  /* A card that is a link lifts under the pointer and settles when pressed. */
+  .lift {
+    transition:
+      translate 0.22s var(--ease),
+      border-color 0.22s var(--ease),
+      box-shadow 0.22s var(--ease);
+  }
+  .lift:hover {
+    translate: 0 -4px;
+    border-color: var(--rim-strong);
+    box-shadow:
+      inset 0 1px 0 var(--specular),
+      0 26px 50px -26px rgba(0, 0, 0, 1);
+  }
+  .lift:active {
+    translate: 0 -1px;
+  }
+
+  /* -------------------------------------------------------------- controls -- */
+  .btn {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    height: 44px;
+    padding-inline: 22px;
+    border-radius: 999px;
+    border: 1px solid transparent;
+    font-family: var(--font-sans);
+    font-size: 13.5px;
+    font-weight: 500;
+    letter-spacing: -0.005em;
+    cursor: pointer;
+    isolation: isolate;
+    transition:
+      translate 0.16s var(--ease),
+      background-color 0.16s var(--ease),
+      border-color 0.16s var(--ease),
+      box-shadow 0.16s var(--ease);
+  }
+  .btn:hover:not(:disabled) {
+    translate: 0 -1px;
+  }
+  .btn:active:not(:disabled) {
+    translate: 0 1px;
+  }
+  .btn:disabled {
+    opacity: 0.42;
+    cursor: not-allowed;
+  }
+
+  .btn-brand {
+    background: var(--brand);
+    color: #080716;
+    font-weight: 600;
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.5),
+      0 10px 26px -12px rgba(124, 92, 255, 0.9);
+  }
+  /* The lit-object overlay: a white gradient that dies at 48%. */
+  .btn-brand::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    border-radius: inherit;
+    background: linear-gradient(
+      180deg,
+      rgba(255, 255, 255, 0.28),
+      rgba(255, 255, 255, 0) 48%
+    );
+  }
+  .btn-brand:hover:not(:disabled) {
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.6),
+      0 16px 34px -12px rgba(124, 92, 255, 1);
+  }
+
+  .btn-glass {
+    background: var(--glass);
+    border-color: var(--rim);
+    color: var(--color-hi);
+    backdrop-filter: blur(14px);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16);
+  }
+  .btn-glass:hover:not(:disabled) {
+    background: var(--glass-2);
+    border-color: var(--rim-strong);
+  }
+
+  .btn-sm {
+    height: 34px;
+    padding-inline: 15px;
+    font-size: 12.5px;
+  }
+
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 32px;
+    padding-inline: 14px;
+    border-radius: 999px;
+    border: 1px solid var(--line);
+    background: var(--glass);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    color: var(--color-mid);
+    cursor: pointer;
+    white-space: nowrap;
+    transition:
+      background-color 0.16s var(--ease),
+      color 0.16s var(--ease),
+      border-color 0.16s var(--ease);
+  }
+  .chip:hover {
+    border-color: var(--rim-strong);
+    color: var(--color-hi);
+  }
+  .chip[data-on="true"] {
+    background: var(--brand);
+    border-color: transparent;
+    color: #080716;
+    font-weight: 600;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.45);
+  }
+
+  /* Anything filled with the brand: an active tab, a progress bar, a closed
+     interlock. Dark text, because the gradient is bright at both ends. */
+  .brand-fill {
+    background: var(--brand);
+    color: #080716;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.4);
+  }
+
+  .field {
+    width: 100%;
+    height: 46px;
+    padding-inline: 14px;
+    background: rgba(0, 0, 0, 0.32);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    font-family: var(--font-mono);
+    font-size: 13.5px;
+    color: var(--color-hi);
+    transition:
+      border-color 0.16s var(--ease),
+      box-shadow 0.16s var(--ease);
+  }
+  .field::placeholder {
+    color: var(--color-low);
+  }
+  .field:focus {
+    outline: none;
+    border-color: rgba(124, 92, 255, 0.7);
+    box-shadow: 0 0 0 4px rgba(124, 92, 255, 0.16);
+  }
+  textarea.field {
+    height: auto;
+    padding-block: 12px;
+    line-height: 1.55;
+    resize: vertical;
+  }
+
+  /* ---------------------------------------------------------------- data -- */
+  .tbl {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+  .tbl th {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--color-low);
+    font-weight: 500;
+    text-align: left;
+    padding: 0 14px 10px;
+    border-bottom: 1px solid var(--line);
+    white-space: nowrap;
+  }
+  .tbl td {
+    padding: 14px;
+    border-bottom: 1px solid var(--line-soft);
+    vertical-align: middle;
+  }
+  .tbl tbody tr {
+    transition: background-color 0.16s var(--ease);
+  }
+  .tbl tbody tr:hover {
+    background: var(--glass);
+  }
+  .tbl .r {
+    text-align: right;
+  }
+
+  .terms {
+    display: grid;
+    gap: 0;
+  }
+  .terms > div {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 20px;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .terms > div:last-child {
+    border-bottom: 0;
+  }
+  .terms dt {
+    font-size: 13px;
+    color: var(--color-mid);
+  }
+  .terms dd {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    font-size: 12.5px;
+    text-align: right;
+    color: var(--color-hi);
+  }
+}
+
+/* -----------------------------------------------------------------------------
+   Scene pieces. Not colour-bearing, so they stay out of the cascade fight.
+   -------------------------------------------------------------------------- */
+.rule-x {
+  height: 1px;
+  background: var(--line);
+  border: 0;
+}
+
+.perf {
+  height: 1px;
+  background-image: linear-gradient(
+    to right,
+    var(--line-strong) 0 5px,
+    transparent 5px 12px
+  );
+  background-size: 12px 1px;
+}
+
+/* The floor: a grid laid flat in perspective, fading as it recedes. */
+.grid-floor {
+  position: absolute;
+  inset: auto 0 0 0;
+  height: 55%;
+  pointer-events: none;
+  perspective: 320px;
+  overflow: hidden;
+}
+.grid-floor::before {
+  content: "";
+  position: absolute;
+  inset: -40% -30% -10% -30%;
+  background-image:
+    linear-gradient(to right, rgba(124, 92, 255, 0.32) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(124, 92, 255, 0.22) 1px, transparent 1px);
+  background-size: 64px 64px;
+  transform: rotateX(72deg);
+  transform-origin: bottom center;
+  mask-image: linear-gradient(to top, #000 0%, transparent 78%);
+  -webkit-mask-image: linear-gradient(to top, #000 0%, transparent 78%);
+}
+
+.pulse {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--color-cyan);
+  box-shadow: 0 0 0 0 rgba(52, 230, 255, 0.6);
+  animation: pulse 2.4s var(--ease) infinite;
+}
+
+@keyframes pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(52, 230, 255, 0.55);
+  }
+  70% {
+    box-shadow: 0 0 0 9px rgba(52, 230, 255, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(52, 230, 255, 0);
+  }
+}
+
+.wash {
+  background: var(--warn-wash);
+}
+
+/* The disclosure ring that turns around the hero object. */
+.spin {
+  animation: spin 44s linear infinite;
+  transform-origin: 50% 50%;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  .pulse,
+  .spin {
+    animation: none;
+  }
+  .lift:hover {
+    translate: none;
+  }
+}

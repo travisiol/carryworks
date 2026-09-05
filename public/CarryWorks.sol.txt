@@ -1,0 +1,441 @@
+// SPDX-License-Identifier: MIT
+pragma solidity 0.8.26;
+
+/* =============================================================================
+   CarryWorks — permissionless carry markets.
+
+   A creator names a carry, points it at a strategy and opens a vault. The
+   vault is the market: anyone deposits the underlying asset, shares track a
+   price that only moves when real tokens arrive, and the creator earns a
+   performance fee on the carry and on nothing else.
+
+   The one property everything else rests on: TVL cannot be inflated by a
+   claim. `deployedPrincipal` only ever goes *up* when tokens actually leave
+   the vault, and only ever comes *down* when tokens actually come back — or
+   when the strategist admits a loss. There is no function anywhere in this
+   file that lets any address write a larger number into it.
+
+   NOT DEPLOYED. This file is published so the mechanics can be read before
+   anything exists to read them against.
+   ========================================================================== */
+
+interface IERC20 {
+    function balanceOf(address) external view returns (uint256);
+    function transfer(address, uint256) external returns (bool);
+    function transferFrom(address, address, uint256) external returns (bool);
+    function decimals() external view returns (uint8);
+}
+
+/* Not every token on every chain returns a bool from transfer(). Accept an
+   empty return, reject an explicit false. */
+library Safe {
+    function xfer(address t, address to, uint256 v) internal {
+        (bool ok, bytes memory d) =
+            t.call(abi.encodeWithSelector(IERC20.transfer.selector, to, v));
+        require(ok && (d.length == 0 || abi.decode(d, (bool))), "transfer failed");
+    }
+
+    function xferFrom(address t, address from, address to, uint256 v) internal {
+        (bool ok, bytes memory d) =
+            t.call(abi.encodeWithSelector(IERC20.transferFrom.selector, from, to, v));
+        require(ok && (d.length == 0 || abi.decode(d, (bool))), "transferFrom failed");
+    }
+}
+
+/* -----------------------------------------------------------------------------
+   The market itself. One of these per carry; nothing is shared between them.
+   -------------------------------------------------------------------------- */
+contract CarryVault {
+    using Safe for address;
+
+    /* --- the share token --- */
+    string public name;
+    string public symbol;
+    uint8 public immutable decimals;
+    uint256 public totalSupply;
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    /* --- the shape of the market, fixed at launch, never editable --- */
+    address public immutable asset;
+    address public immutable works;             // the factory that cast this
+    address public immutable creator;           // the strategist
+    address public immutable strategy;          // the ONLY address capital may go to
+    address public immutable protocolFeeTo;
+    uint16  public immutable maxDeployBps;      // ceiling on capital at the strategy; 0 = never leaves
+    uint16  public immutable performanceFeeBps;
+    uint256 public immutable depositCap;        // 0 = uncapped
+    uint64  public immutable openedAt;
+
+    uint16  public constant PROTOCOL_CUT_BPS = 2000; // the works' share of the creator's fee
+    uint256 internal constant BPS = 10_000;
+    uint256 internal constant SEED_SHARES = 1e3;     // burned on the first deposit
+
+    /* --- live accounting --- */
+    uint256 public deployedPrincipal; // asset units sitting at `strategy`
+    uint256 public lastTotalAssets;   // watermark the fee is charged against
+    uint256 public totalCarry;        // lifetime gross carry recognised
+    uint256 public totalDeposited;
+    uint256 public totalWithdrawn;
+    uint32  public depositors;
+    mapping(address => bool) internal everDeposited;
+
+    uint256 internal entered = 1;
+    modifier lock() {
+        require(entered == 1, "reentrant");
+        entered = 2;
+        _;
+        entered = 1;
+    }
+
+    modifier onlyCreator() {
+        require(msg.sender == creator, "not creator");
+        _;
+    }
+
+    event Transfer(address indexed from, address indexed to, uint256 value);
+    event Approval(address indexed owner, address indexed spender, uint256 value);
+    event Deposit(address indexed caller, address indexed owner, uint256 assets, uint256 shares);
+    event Withdraw(address indexed caller, address indexed owner, uint256 assets, uint256 shares);
+    event Report(uint256 totalAssets, uint256 gain, uint256 feeShares, uint256 pricePerShare);
+    event Deployed(uint256 amount, uint256 deployedPrincipal);
+    event Collected(uint256 amount, uint256 principal, uint256 carry);
+    event CarryFunded(address indexed from, uint256 amount);
+    event MarkedDown(uint256 from, uint256 to);
+
+    constructor(
+        address asset_,
+        address creator_,
+        address strategy_,
+        address protocolFeeTo_,
+        string memory name_,
+        string memory symbol_,
+        uint16 maxDeployBps_,
+        uint16 performanceFeeBps_,
+        uint256 depositCap_
+    ) {
+        asset = asset_;
+        works = msg.sender;
+        creator = creator_;
+        strategy = strategy_;
+        protocolFeeTo = protocolFeeTo_;
+        name = name_;
+        symbol = symbol_;
+        decimals = IERC20(asset_).decimals();
+        maxDeployBps = maxDeployBps_;
+        performanceFeeBps = performanceFeeBps_;
+        depositCap = depositCap_;
+        openedAt = uint64(block.timestamp);
+    }
+
+    /* --- views -------------------------------------------------------------- */
+
+    function idleAssets() public view returns (uint256) {
+        return IERC20(asset).balanceOf(address(this));
+    }
+
+    function totalAssets() public view returns (uint256) {
+        return idleAssets() + deployedPrincipal;
+    }
+
+    function one() public view returns (uint256) {
+        return 10 ** decimals;
+    }
+
+    function pricePerShare() public view returns (uint256) {
+        uint256 s = totalSupply;
+        return s == 0 ? one() : (totalAssets() * one()) / s;
+    }
+
+    function convertToShares(uint256 assets) public view returns (uint256) {
+        uint256 s = totalSupply;
+        uint256 ta = totalAssets();
+        return (s == 0 || ta == 0) ? assets : (assets * s) / ta;
+    }
+
+    function convertToAssets(uint256 shares) public view returns (uint256) {
+        uint256 s = totalSupply;
+        return s == 0 ? shares : (shares * totalAssets()) / s;
+    }
+
+    /* What a holder can actually take out right now. Capital at the strategy is
+       not liquid, and this says so rather than pretending. */
+    function maxWithdraw(address owner) external view returns (uint256) {
+        uint256 v = convertToAssets(balanceOf[owner]);
+        uint256 idle = idleAssets();
+        return v < idle ? v : idle;
+    }
+
+    /* Room left under the custody ceiling. */
+    function deployableNow() public view returns (uint256) {
+        uint256 ceiling = (totalAssets() * maxDeployBps) / BPS;
+        if (ceiling <= deployedPrincipal) return 0;
+        uint256 room = ceiling - deployedPrincipal;
+        uint256 idle = idleAssets();
+        return room < idle ? room : idle;
+    }
+
+    /* --- the market --------------------------------------------------------- */
+
+    function deposit(uint256 assets, address receiver) external lock returns (uint256 shares) {
+        require(assets > 0, "zero");
+        require(receiver != address(0), "receiver");
+        uint256 ta = _report();
+        uint256 supply = totalSupply;
+        require(supply == 0 || ta > 0, "impaired");
+        if (depositCap != 0) require(ta + assets <= depositCap, "cap reached");
+
+        shares = supply == 0 ? assets : (assets * supply) / ta;
+        require(shares > 0, "dust");
+
+        asset.xferFrom(msg.sender, address(this), assets);
+
+        if (supply == 0) {
+            /* The first deposit burns a floor of dead shares so the price per
+               share cannot be walked up underneath the second depositor. */
+            require(shares > SEED_SHARES, "seed too small");
+            _mint(address(0xdEaD), SEED_SHARES);
+            shares -= SEED_SHARES;
+        }
+        _mint(receiver, shares);
+
+        lastTotalAssets = ta + assets;
+        totalDeposited += assets;
+        if (!everDeposited[receiver]) {
+            everDeposited[receiver] = true;
+            depositors += 1;
+        }
+        emit Deposit(msg.sender, receiver, assets, shares);
+    }
+
+    function withdraw(uint256 shares, address receiver) external lock returns (uint256 assets) {
+        require(shares > 0 && shares <= balanceOf[msg.sender], "shares");
+        require(receiver != address(0), "receiver");
+        uint256 ta = _report();
+        assets = (shares * ta) / totalSupply;
+        require(assets > 0, "dust");
+        /* Reverts rather than queueing. An illiquid market says so at the call. */
+        require(assets <= idleAssets(), "not liquid");
+
+        _burn(msg.sender, shares);
+        lastTotalAssets = ta - assets;
+        totalWithdrawn += assets;
+        asset.xfer(receiver, assets);
+        emit Withdraw(msg.sender, msg.sender, assets, shares);
+    }
+
+    /* --- custody ------------------------------------------------------------ */
+
+    /* Capital may only ever go to `strategy`, and only up to the ceiling that
+       was written in at launch. */
+    function deployCapital(uint256 amount) external lock onlyCreator {
+        require(maxDeployBps > 0 && strategy != address(0), "locked vault");
+        require(amount > 0 && amount <= deployableNow(), "over ceiling");
+        deployedPrincipal += amount;
+        asset.xfer(strategy, amount);
+        emit Deployed(amount, deployedPrincipal);
+    }
+
+    /* Anyone may bring capital back. `principal` retires the claim; whatever
+       arrives beyond it is carry, and is recognised on the next report. */
+    function collect(uint256 amount, uint256 principal) external lock {
+        require(amount > 0 && principal <= amount, "amounts");
+        require(principal <= deployedPrincipal, "over principal");
+        asset.xferFrom(msg.sender, address(this), amount);
+        deployedPrincipal -= principal;
+        emit Collected(amount, principal, amount - principal);
+        _report();
+    }
+
+    /* Carry paid in from outside, for a market whose capital never leaves. */
+    function fundCarry(uint256 amount) external lock {
+        require(amount > 0, "zero");
+        asset.xferFrom(msg.sender, address(this), amount);
+        emit CarryFunded(msg.sender, amount);
+        _report();
+    }
+
+    /* The strategist admitting a loss. This is the ONLY function that touches
+       `deployedPrincipal` without a token movement, and it can only ever
+       lower it. There is deliberately no counterpart that raises it. */
+    function markDown(uint256 newPrincipal) external lock onlyCreator {
+        require(newPrincipal < deployedPrincipal, "not a markdown");
+        uint256 from = deployedPrincipal;
+        deployedPrincipal = newPrincipal;
+        emit MarkedDown(from, newPrincipal);
+        uint256 ta = totalAssets();
+        if (ta < lastTotalAssets) lastTotalAssets = ta;
+    }
+
+    /* --- the fee ------------------------------------------------------------ */
+
+    /* Mints fee shares only against a gain over the watermark, so the fee is
+       charged on carry and never on principal. Dilution equals the fee and
+       nothing else. */
+    function _report() internal returns (uint256 ta) {
+        ta = totalAssets();
+        uint256 last = lastTotalAssets;
+        uint256 supply = totalSupply;
+
+        if (ta <= last || supply == 0 || performanceFeeBps == 0) {
+            lastTotalAssets = ta;
+            emit Report(ta, 0, 0, pricePerShare());
+            return ta;
+        }
+
+        uint256 gain = ta - last;
+        totalCarry += gain;
+
+        uint256 feeAssets = (gain * performanceFeeBps) / BPS;
+        uint256 feeShares = (feeAssets * supply) / (ta - feeAssets);
+        if (feeShares > 0) {
+            uint256 toProtocol = (feeShares * PROTOCOL_CUT_BPS) / BPS;
+            if (toProtocol > 0) _mint(protocolFeeTo, toProtocol);
+            _mint(creator, feeShares - toProtocol);
+        }
+
+        lastTotalAssets = ta;
+        emit Report(ta, gain, feeShares, pricePerShare());
+    }
+
+    /* --- ERC-20 ------------------------------------------------------------- */
+
+    function transfer(address to, uint256 v) external returns (bool) {
+        _move(msg.sender, to, v);
+        return true;
+    }
+
+    function approve(address spender, uint256 v) external returns (bool) {
+        allowance[msg.sender][spender] = v;
+        emit Approval(msg.sender, spender, v);
+        return true;
+    }
+
+    function transferFrom(address from, address to, uint256 v) external returns (bool) {
+        uint256 a = allowance[from][msg.sender];
+        if (a != type(uint256).max) {
+            require(a >= v, "allowance");
+            allowance[from][msg.sender] = a - v;
+        }
+        _move(from, to, v);
+        return true;
+    }
+
+    function _move(address from, address to, uint256 v) internal {
+        require(balanceOf[from] >= v, "balance");
+        require(to != address(0), "to");
+        unchecked {
+            balanceOf[from] -= v;
+            balanceOf[to] += v;
+        }
+        emit Transfer(from, to, v);
+    }
+
+    function _mint(address to, uint256 v) internal {
+        totalSupply += v;
+        unchecked {
+            balanceOf[to] += v;
+        }
+        emit Transfer(address(0), to, v);
+    }
+
+    function _burn(address from, uint256 v) internal {
+        require(balanceOf[from] >= v, "balance");
+        unchecked {
+            balanceOf[from] -= v;
+            totalSupply -= v;
+        }
+        emit Transfer(from, address(0), v);
+    }
+}
+
+/* -----------------------------------------------------------------------------
+   The works. It casts vaults and keeps the register. It cannot pause one,
+   upgrade one, or take one down, and it never holds a depositor's asset.
+   -------------------------------------------------------------------------- */
+contract CarryWorks {
+    uint256 public constant LAUNCH_FEE = 0.001 ether;
+    uint16  public constant MAX_PERFORMANCE_FEE_BPS = 2000;
+
+    address public immutable feeTo;
+    address[] public markets;
+    mapping(address => address[]) public marketsOf; // creator => vaults
+    mapping(address => string) public descriptionOf;
+
+    event MarketOpened(
+        address indexed vault,
+        address indexed creator,
+        address indexed asset,
+        address strategy,
+        uint16 maxDeployBps,
+        uint16 performanceFeeBps,
+        uint256 depositCap,
+        string name,
+        string symbol,
+        string description
+    );
+
+    constructor(address feeTo_) {
+        require(feeTo_ != address(0), "feeTo");
+        feeTo = feeTo_;
+    }
+
+    function marketCount() external view returns (uint256) {
+        return markets.length;
+    }
+
+    function open(
+        address asset,
+        address strategy,
+        string calldata name,
+        string calldata symbol,
+        string calldata description,
+        uint16 maxDeployBps,
+        uint16 performanceFeeBps,
+        uint256 depositCap
+    ) external payable returns (address vault) {
+        require(msg.value >= LAUNCH_FEE, "launch fee");
+        require(asset != address(0), "asset");
+        require(maxDeployBps <= 10_000, "ceiling");
+        require(performanceFeeBps <= MAX_PERFORMANCE_FEE_BPS, "fee too high");
+        /* A market with nowhere to send capital must be sealed, so that a
+           strategy address can never be implied after the fact. */
+        require(strategy != address(0) || maxDeployBps == 0, "sealed vault needs 0 ceiling");
+        require(bytes(name).length > 0 && bytes(name).length <= 64, "name");
+        require(bytes(description).length <= 600, "description");
+
+        vault = address(
+            new CarryVault(
+                asset,
+                msg.sender,
+                strategy,
+                feeTo,
+                name,
+                symbol,
+                maxDeployBps,
+                performanceFeeBps,
+                depositCap
+            )
+        );
+
+        markets.push(vault);
+        marketsOf[msg.sender].push(vault);
+        descriptionOf[vault] = description;
+
+        (bool sent, ) = feeTo.call{value: msg.value}("");
+        require(sent, "fee transfer");
+
+        emit MarketOpened(
+            vault,
+            msg.sender,
+            asset,
+            strategy,
+            maxDeployBps,
+            performanceFeeBps,
+            depositCap,
+            name,
+            symbol,
+            description
+        );
+    }
+}
